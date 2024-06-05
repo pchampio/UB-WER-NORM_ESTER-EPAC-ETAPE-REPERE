@@ -1,0 +1,1691 @@
+#!/usr/bin/perl 
+
+# Tool taken and modified from the campagne d'évaluation ESTER
+################################################################################
+
+no locale;
+use Getopt::Long;
+use Pod::Usage;
+
+
+#paramètres d'initialisation
+$htmlparse=0;
+$nargs=$#ARGV+1;
+$printunk=0;
+$skipunk=0; 
+$wordseparator=" ";
+$characterseparator="";
+$verbose=0;
+$nlines=0;
+$nnlines=0;
+$textonly=0;
+$vocabulary_output=0;
+$normalize=2;
+$stmparse=0;
+$convertnum=1;
+$inputencoding="";
+$outputencoding="";
+$defaultencoding="utf-8";
+$output="-";
+$scriptflag=0;
+$ocmd="";
+$inittime=time();
+$dictionnaryseparator='\s*=>\s*';
+$firsttime=1;
+$normalize_when="before"; # means normalisation before usage of dictionnary
+
+
+#lecture des arguments
+
+ARGUMENT : 
+#récupération des options
+    GetOptions( 'dictionary|d=s'         => \$dico,
+		'inputencoding|ie=s'     => \$inputencoding,
+		'outputencoding|oe=s'    => \$outputencoding,
+		'printunknown|u:i'       => \$printunknown,
+		'skipunknown|s'          => \$spkipunk,
+		'inputformat|if=s'       => \$inputformat,
+		'verbose|v'              => \$verbose,
+		'outputformat|of=s'      => \$outputformat,
+		'input|i=s'              => \$input,
+		'output|o=s'             => \$output,
+		'normalize|n:i'          => \$normalize,
+		'normalize_order|no=s'     => \$normalize_when,
+		'numtolitterals|l:i'       => \$convertnum,
+		'wordseparator|w=s'      => \$wordseparator, 
+		'characterseparator|c=s' => \$characterseparator,
+		'dictionnaryseparator|ds=s'=> \$dictionnaryseparator,
+		'postprocess|p=s'        => \$postprocess,
+		'batch|b=s'              => \$batchfile,
+		'help'                   => \$help,
+		'man'                    => \$man
+		) or exit(1);
+
+#if ($normalize==0) { $normalize=2;}
+#if ($normalize==-1) {$normalize=0;}
+
+
+
+pod2usage(0) if $help;
+
+pod2usage(1) if $man;
+
+
+#récupération des noms de fichiers
+$nargs=$#ARGV+1;
+
+   for ($j=0;$j<$nargs;$j++) {
+	$arg=@ARGV[$j];
+	$files[$nfiles]=$arg;
+	$nfiles++;
+    }
+
+    if ($nfiles==0) {
+	$nfiles=1;
+	$files[0]="-";
+    }
+
+#traitement des options de format et d'encodage
+
+$mask{txt}=$mask{text}=$mask{texte}=$mask{t}=1;
+$mask{lex}=128;
+$mask{xml}=$mask{x}=2;
+$mask{html}=$mask{htm}=6;
+$mask{ne}=64;
+$mask{stm}=8;
+$mask{"stm-ne"}=$mask{ne}|$mask{stm};
+$mask{ctm}=16;
+$mask{tab}=256;
+$mask{json}=512;
+$mask{"ctm-ne"}=$mask{ne}|$mask{ctm};
+$mask{vocab}=$mask{v}=$mask{voc}=32;
+
+$fields{stm}="";
+$fields{ctm}="";
+
+$force_mask=0;
+$output_mask=0;
+
+if ($postprocess ne "") {
+    $ocmd = "| $postprocess ";
+}
+
+if ($inputformat ne "") {
+    $force_mask=$mask{"$inputformat"};
+}
+
+if ($outputformat ne "") {
+    $output_mask=$mask{"$outputformat"};
+}
+
+# gestion de l'encodage (vérifications basique);
+
+if ($inputencoding ne ""  && $inputencoding ne $outputencoding)  {
+    &encodingtest($inputencoding) || die "Unknown input encoding : $inputencoding\n";
+}
+
+if ($outputencoding ne ""  && $inputencoding ne $outputencoding) {
+    &encodingtest($outputencoding) || die "Unknown output encoding : $outputencoding\n";
+}
+
+#lecture du dictionnaire si présent
+
+if ($dico ne "") {
+    open( DICO, $dico ) || die "error while opening the dictionary file : $dico\n";
+    if ($verbose) {
+	print "$utilisation du dictionnaire $dico\n";
+    }
+    $nwords=0;
+    $var{format}='.*';
+    $translation_id=0;
+  DICOLINE:
+    while (<DICO>) {
+	chomp;
+	if (/^\#\s*declare\s+(\S+)=(\S+)/) {
+	    $var{$1}=$2;
+	}
+	s/^\#.*//;
+	s/^\s*//;
+	s/\s*$//;
+	next DICOLINE if ($_ eq "");
+	if ($inputformat=~/$var{format}/) {
+	    $nwords++;
+	    if (/$dictionnaryseparator/) {
+		($word,$translation)=split(/$dictionnaryseparator/,$_,2);
+		&addtodic($word,$translation);
+	    }
+	    else { die "Dictionnary syntax error in $dico at line $.\n";}
+	}
+    }
+    close(DICO);
+#    if ($verbose) {
+#	foreach $word (keys %partial) {
+#	    print STDERR "$word : ".join(",",@{$partial{$word}})."\n";
+#	}
+#    }
+    if ($verbose) { print STDERR "$nwords words in dictionnary\n";}
+}
+
+if ($batchfile ne "") {
+    open( BATCH, $batchfile ) || die "error while opening the batch : $batchfile\n";
+    $nfiles=0;
+    
+    
+  BATCHLINE:
+    while (<BATCH>) {
+	chop;
+	s/^\#.*//;
+	s/^\s*//;
+	s/\s*$//;
+	next BATCHLINE if ($_ eq "");
+	if (/^\s*(\S+)/) {
+	    $files[$nfiles]=$1;
+	    $nfiles++;
+	}
+	if (/^\s*(\S+)\s+(\S+)/) {
+	    $ifile=$1;
+	    $ofile=$2;
+	    $ofilename{$ifile}=$ofile;
+	}
+
+    }
+    close(BATCH);
+    
+    if ($verbose) { print STDERR "$nfiles in batchfile\n";}
+}
+
+
+#début du programme
+
+if ($verbose) {
+    print STDERR "$nfiles file(s) to process\n";
+}
+
+if ($force_mask && $normalize) {&formatinit()}
+if (!($output=~/%s/)) { # cas d'un fichier unique de sortie : nettoyage de ce fichier
+    open (OFILE, ">$output");
+    print OFILE "";
+    close OFILE;
+}
+
+while($nfile<$nfiles) {
+#traitement des fichiers
+$file=$files[$nfile];
+
+
+
+if ($input ne "") {
+    $tmp=$file;
+    if ($output=~/\//) {
+	$tmp =~ s/.*\///;
+    }
+    if ($input=~/\.[^\/]$/) {
+	$tmp =~ s/\.[^\.]*$//;
+    }
+    $file=$input;
+    $file=~s/\%s/$tmp/g;
+}
+$msg="reading from $file";
+$msg=~s/ \-$/ input/;
+
+if ($output ne "") {
+    $tmp="";
+    if ($batchfile ne "") {
+	$tmp=$ofilename{$file};
+	if ($tmp eq "") {
+	    $ifile=$file;
+	    $ifile=~s/.*\///;
+	    $tmp=$ofilename{$ifile};
+	    if ($tmp eq "") {
+		$ifile =~ s/\.[^\.]*$//;
+		$tmp=$ofilename{$ifile};
+	    }
+	}
+    }
+    if ($tmp eq "") {
+	$tmp=$file;
+    }
+    if ($output=~/\//) {
+	$tmp =~ s/.*\///;
+    }
+    if ($output=~/\.[^\/]*$/) {
+	$tmp =~ s/\.[^\.]*$//;
+    }
+    $ofile=$output;
+    $ofile=~s/\%s/$tmp/g;
+    $msg.=" and writing to $ofile";
+    $msg=~s/ \-$/ output/;
+} else {
+    $ofile="-";
+    };
+if ($verbose) {print STDERR "$msg\n";}
+
+
+$nfile++;
+
+open(FILE, "<$file") || die "$file:$!";
+if (($ocmd ne "") && ($ofile eq "-")) {
+  open(OFILE, "$ocmd") || die $!; # ouverture du fichier de sortie
+} else {
+    if ($output =~ /%s/) {
+	open(OFILE, "$ocmd>$ofile") || die $!; # ouverture du fichier de sortie
+    } else {
+	open(OFILE, "$ocmd>>$ofile") || die $!; # ouverture du fichier unique de sortie en mode append
+    }
+}
+
+
+$nline=1;
+%unkdic={};
+%count={};
+
+$format_mask=$force_mask; # format de fichier par défaut
+while (<FILE>) {
+    if (!$format_mask) { # tente de déterminer le format de fichier d'entrée si aucun n'est spécifié
+	if (/<\?xml.*\?>/i) {$format_mask=$mask{xml};  }
+	if (/<html\s*>/i)  {$format_mask=$mask{html}; &addtodic("&nbsp;"," ");}
+	if (/^;;/) { $format_mask=$mask{stm}}
+	if ($normalize) {&formatinit()}
+    }
+
+
+    # gestion de l'encodage 
+    # dans le cas d'un fichier xml, tente de récupérer le format indiqué dans le header du xml 
+    # si aucun n'est spécifié dans les options
+    if ($mask{xml} & $format_mask) {
+	$/='>';
+	if ($inputencoding eq "") {
+	    $xmlquote=$_;
+	    $xmlquote =~ /<\?xml.*\?>?/i  || ($mask{htm}&$format_mask) || die "XML header missing $xmlquote\n"; 
+	    if ($xmlquote =~ /encoding=\"([^\"]+)\"/) {
+		$inputencoding=$1; 
+		s/encoding=\"([^\"]+)\"/encoding=\"$outputencoding\"/;
+	    }
+	    else {
+		if ($xmlquote =~ /encoding=(\S+)/) {
+		    $inputencoding=$1;
+		}
+		else { $inputencoding=$defaultencoding;
+		   }
+	    }
+	}
+	if ($outputencoding eq "") {
+	    $outputencoding=$inputencoding;
+	}
+    }
+	
+    if ($inputencoding ne ""  && $inputencoding ne $outputencoding) {
+	if ($inputencoding eq "Guess") {
+	    require Encode::Guess;
+	    $tmpenc=Encode::Guess::guess_encoding($_,qw/utf8/);
+	    if (ref($tmpenc)) {
+		$_=$tmpenc->decode($_);
+	    }
+	}
+	else {
+	    $_=Encode::decode($inputencoding,$_);
+	}
+	    
+    }
+    if ($outputencoding ne ""  && $inputencoding ne $outputencoding) {
+	$_=Encode::encode($outputencoding,$_);
+
+    }
+    
+    # cas des commentaires en format stm
+    if ( /^;;/ && ($mask{stm}&$format_mask) ) { 
+	if (! ($output_mask&$mask{txt})) {$outtext=$_;chop($outtext);} 
+	else {$outtext="";}; $_=""; 
+	if (! ($output_mask&$mask{tab})) {$outtext=$_;chop($outtext);} 
+	else {$outtext="";}; $_=""; 
+	goto PRINT;
+    }
+
+
+    #initialisation des champs
+    $filename="";      # nom du fichier (format stm)
+    $channel="";            # numéro du canal (format stm)
+    $speaker="";       # nom du locuteur (format stm)
+    $startTime="";     # temps de début du segment (format stm)
+    $endTime="";       # temps de fin du segment (format stm)
+    $conditions="";    # conditions acoustiques (format stm)
+    $text="";          # corps du texte à normaliser
+
+    $outtext="";       # texte normalisé
+
+
+    if ($format_mask&$mask{stm}) { # format stm
+	s/^\s*//;
+	chomp;
+	@fields=split (/\s+/,$_,7);
+	$filename   = shift @fields;
+	$channel    = shift @fields;
+	$speaker    = shift @fields;
+	$startTime  = shift @fields;
+	$endTime    = shift @fields;
+	$conditions = shift @fields;
+	$text       = shift @fields;
+	if (! ($conditions =~ /\<.+\>/)) {
+	    $text = "$conditions $text";
+	    $conditions = "";
+	}
+	$_=$text;
+	if ($output_mask&$mask{tab}) {
+	    $startTime =~ tr/.//d;
+	    $startTime = sprintf("%08s", $startTime);
+	    $startTime = substr($startTime, 0, -1);
+	    $endTime =~ tr/.//d;
+	    $endTime = sprintf("%08s", $endTime);
+	    $endTime = substr($endTime, 0, -1);
+	    $filename = "$filename-$startTime-$endTime"
+	}
+    }
+
+    if ($format_mask&$mask{tab}) { # format tab
+	s/^\s*//;
+	chomp;
+	@fields=split (/\t+/,$_,2);
+	# print @fields;
+	$filename   = shift @fields;
+	# print "\n$filename\t";
+	$text    = shift @fields;
+	# print "2: $text\n";
+	# $speaker    = shift @fields;
+	# $startTime  = shift @fields;
+	# $endTime    = shift @fields;
+	# $conditions = shift @fields;
+	# $text       = shift @fields;
+	# if (! ($conditions =~ /\<.+\>/)) {
+	#     $text = "$conditions $text";
+	#     $conditions = "";
+	# }
+	$_=$text;
+	# print "3: $_\n"
+    }
+
+    if ($format_mask&$mask{json}) { # format json
+	s/^\s*//;
+	chomp;
+	@fields=split (/\t+/,$_,3);
+	# print @fields;
+	$filename   = shift @fields;
+	# print "\n$filename\t";
+	$text    = shift @fields;
+	$text_ori    = $text;
+	$json_pos    = shift @fields;
+	$text    = $json_pos;
+	# $speaker    = shift @fields;
+	# $startTime  = shift @fields;
+	# $endTime    = shift @fields;
+	# $conditions = shift @fields;
+	# $text       = shift @fields;
+	# if (! ($conditions =~ /\<.+\>/)) {
+	#     $text = "$conditions $text";
+	#     $conditions = "";
+	# }
+	$_=$text;
+	# print "3: $_\n"
+    }
+
+    if ($format_mask&$mask{lex}) { # format lex
+	s/^\s*//;
+	chomp;
+	$filename="";
+	$text="";
+	$startTime="";
+	$endTime="";
+	if (s/^(.*)\((\S+)\-([0-9\.]+)\-([0-9\.]+)\)\s*$//) {
+	    $filename=$2;
+	    $text=$1;
+	    $startTime=$3;
+	    $endTime=$4;
+	}
+	$_=$text;
+    }
+
+    if ($format_mask&$mask{ctm}) { # format ctm
+	s/^\s*//;
+	chomp;
+	@fields=split (/\s+/,$_);
+	$filename   = shift @fields;
+	$channel    = shift @fields;
+	$startTime  = shift @fields;
+	$duration   = shift @fields;
+	$text       = shift @fields;
+	$confidence = shift @fields; 
+	$type       = shift @fields; 
+	$speaker    = shift @fields; 
+	if ($format_mask&$mask{ne}) {
+	    if ($text=~s/(.*?)(--.*)/$1/) {
+		$entity=$2;
+	    } else {
+		$entity="";
+	    }
+	}
+	$_=$text;
+	
+    }
+
+    if ($format_mask == $mask{ne}) { # format NE (entités nommées : 1 mot une catégorie)
+	s/^\s*//;
+	chomp;
+	($text,$entity)=split (/\s+/,$_,2);
+	$_=$text;
+
+    }
+   
+    if ($format_mask&$mask{xml}) { 
+#	$_.=$/;
+#	print "(( $. $_ $scriptflag ";
+	$completexml=$_;
+	($_,$xmlterm)=split(/</,$_,2);
+	if ($xmlterm ne "") {
+	    $xmlterm='<'.$xmlterm;
+	}
+	if ($format_mask&$mask{html}) {
+	    if ($xmlterm=~/<\!\-\-/) {
+		$scriptflag++;
+	    }
+	    if ($xmlterm=~/<script/i) {
+		$scriptflag++;
+
+	    }
+	    if ($xmlterm=~/\-\-\>/) {
+#		print " !!! ";
+		$_="";
+		$scriptflag--;
+	    }
+	    if ($_=~s/<\!\-\-.*//) {
+		$_="";
+		$scriptflag++;
+	    }
+	    if ($_=~s/.*-->//) {
+		$scriptflag--;
+	    }
+
+	    if ($xmlterm=~/<\/script/i) {
+		$_="";
+		$scriptflag--;
+	    }
+	}
+#	print " $xmlterm $scriptflag ))\n\n\n\n";
+    }
+
+    if ( ! $mask{json}&$format_mask ) {
+    if ( not defined $text && ($mask{stm}&$format_mask) && $output_mask&$mask{tab} ) { 
+	next;
+    }
+    }
+    if ( $text eq "ignore_time_segment_in_scoring" && ($mask{stm}&$format_mask) && $output_mask&$mask{tab} ) { 
+	next;
+    }
+    if ( $text eq "" && ($mask{stm}&$format_mask) && $output_mask&$mask{tab} ) { 
+	next;
+    }
+
+
+
+    
+  TEXT:
+    if ($format_mask&$mask{html} && $output_mask&$mask{txt}) {
+	&htmlclean;
+    }		
+    if ($output_mask&$mask{tab}) {
+	&htmlclean;
+    }		
+    if ($output_mask&$mask{json}) {
+	&htmlclean;
+    }		
+    if ($normalize_when eq "before" && $normalize) { $_=&normalize($_); }
+# remplacement mot à  mot dans le cas d'utilisation d'un dictionnaire
+    @words=split(/\s+/m,$_); 
+    @partial_match_ids=();
+    $partial_match="";
+    WORD:
+    foreach $word (@words) { # traitement du dictionnaire
+	if ((($normalize_when eq "before") && ($format_mask eq $mask{"stm-ne"}) && ($word=~s/^(\S+?)\-\-(.*)/$1/) ) || ($word =~ /(\S)/) ) { # mot ayant au moins un caractère non blanc
+	    my $tail=$2;
+	    $outword="";
+	    my $translation="";
+	    my $tmp=$partial{"$word"};
+	    $translation=$dico{@{$tmp}[0]};
+	    if ($tail ne "") {
+		$translation=~s/(\S)($|\s)/$1\-\-$tail$2/g;
+	    }
+	    if ($translation ne "") {
+#		$matched{$word}=1;
+		if ($tail ne "") {
+		    $word.="--$tail";
+		}
+		&analyse_partial_match();
+		if ($printunk ne 2) { 
+		    $outword=$translation;
+		}
+		$count++;
+		@partial_match_ids=();
+		$partial_match="";
+	    }
+	    else {
+		if ($#{$tmp} >= 0) {
+#		    print "$word @{$tmp}[0] $translation\n";		
+		    $partial_match.=" $word";
+		    push(@partial_match_ids,$tmp);
+		    push(@partial_words,$word); ###xxx
+		    push (@partial_tails,$tail); ###xxx
+		    next WORD;
+		} else {
+		    if ($tail ne "") {
+			$word.="--$tail";
+		    }
+		    &analyse_partial_match();
+		    @partial_match_ids=();
+		    $partial_match="";
+		    if ($skipunk eq 0) { 
+			if ($printunk eq 1) { $outword="UNK";}
+			else { $outword=$word; }
+		    }
+		
+		    $unkdic{$word}++;
+		    $global_unkdic{$word}++;
+		    $nunk++;
+		    $global_nunk++;
+		}
+	    }
+	    if ($normalize && ($format_mask&$mask{ctm})) {
+		$outword=~s/{/<ALT_BEGIN>/;
+		$outword=~s/}/<ALT_END>/;
+		$outword=~s/@//;
+		$outword =~ s/\//<ALT>/;
+	    }
+
+	    if ($convertnum && (!$normalize)) { # conversion de chiffres en lettres quand pas de normalisation
+		$wordtest=$outword+0;
+		if ($outword=~/^[0-9]+$/) {
+		    $outword=&numtolitteral($outword);
+		    $outword=~s/^\s+//;
+		    $outword=~s/\s+$//;
+		    if ($normalize) {
+			$outword=&normalize($outword);
+		    }
+		}
+		elsif ($outword=~/^\(([0-9]+)(\-?)\)$/) {
+		    $outword=&numtolitteral($1);
+		    $outword=~s/^\s+//;
+		    $outword=~s/\s+$//;
+		    if ($normalize) { 
+			$outword=&normalize($outword);
+		    }
+		    $outword=~s/\s+/\) \(/g;
+		    $outword="($outword)";
+		    $outword=~s/\(\(/\(/g;
+		    $outword=~s/\)\)/\)/g;
+               }		
+		$outword=~s/\s+/$wordseparator/g;
+		$lastoutword=$outword;
+		$lastword=$word;
+	    }
+	    $outtext.=$outword.$wordseparator;
+	}
+	else { # gestion des espace entre les mots
+	    $outword=$word;
+	    if ($normalize) {
+		$outword=~s/[^\n]//mg; # la normalization supprime les espaces et non les sauts de ligne
+		if ($outword eq "") {
+		    $outword=$wordseparator; # 
+		}
+	    }
+	    $outtext.=$outword;
+	}
+    }
+    if ($partial_match ne "")  {
+	&analyse_partial_match();
+    }
+    if ($normalize_when eq "after" && $normalize) {
+	$outtext=&normalize($outtext);
+    }
+    @outwords=split(/$wordseparator+/,$outtext);
+    $noutwords=0;
+    foreach $suboutword(@outwords) {
+    	$count{$suboutword}++;
+	$noutwords++;
+	$global_count{$suboutword}++;
+    }
+
+
+    if ($format_mask&$mask{xml}) {
+	if (! ($output_mask&$mask{txt})) {
+	    if ($outtext ne "") { $front="";} else { $front="";}
+	    $outtext.=$front.$xmlterm."";
+	}
+    }
+
+    if (($format_mask&$mask{stm}) && (! ($output_mask&$mask{txt}))) { # formattage stm
+	if (($format_mask&$mask{stm}) && (! ($output_mask&$mask{tab}))) { # formattage stm
+	    $outtext="$filename $channel $speaker $startTime $endTime $conditions ".$outtext;
+	    # remove multiple space from output (it happens when there is no conditions for example) 
+	    $outtext =~ s/\s+/ /g; 
+	}
+    }
+
+    if ($format_mask == $mask{lex}) {
+	$outtext=~ s/\n//;
+	$outtext="$outtext ($filename-$startTime-$endTime)\n";
+    } 
+
+    if ($format_mask == $mask{tab} || $output_mask&$mask{tab}) {
+	$outtext="$filename\t$outtext\n";
+    } 
+
+    if ($format_mask == $mask{json} || $output_mask&$mask{json}) {
+	$outtext="$filename\t$outtext\n";
+    } 
+
+    
+
+    if ((($format_mask == $mask{ne}) && (! ($output_mask&$mask{txt})))) {
+	$outtext="";
+	if ($noutwords>0) {
+	    foreach $suboutword(@outwords) {
+		$outtext.=sprintf("%s %s\n",$suboutword,$entity);
+	    }
+	}
+	else {
+	    $outtext="";
+	}
+    }
+
+    if (($format_mask&$mask{ctm}) && (! ($output_mask&$mask{txt}))) { # formattage ctm
+	$outtext="";
+	if ($noutwords>0) {
+	    $localStartTime=$startTime;
+	    $localDuration=$duration/$noutwords;
+		foreach $suboutword(@outwords) {
+		    if ($suboutword=~/ALT/) { # gestion des alternatives
+			$noutwords=1;
+			$localStartTime=$startTime;
+			$localDuration=$duration;
+			$outtext.=sprintf("%s %i * * %s\n",$filename,$channel,$suboutword);
+		    }
+		    else {
+			if ($format_mask&$mask{ne}) {
+			    $suboutword.=$entity;
+			}
+			$outtext.=sprintf("%s %i %.3f %.3f %s %.4f %s %s\n",$filename,$channel,$localStartTime,$localDuration,$suboutword,$confidence,$type,$speaker);
+			$localStartTime+=$localDuration;
+		    }
+		}
+	}
+	else {
+	    $outtext="";
+	}
+
+
+    }
+
+
+
+  PRINT:
+    if ($outtext ne "" && (($format_mask&$mask{stm}) || ($output_mask&$mask{txt} || ($output_mask&$mask{lex} ) )) ) { $EOL="\n";} else {$EOL="";}
+    if (($output_mask&$mask{tab}) ) { $EOL="";}
+    if (!$vocabulary_output) { print OFILE $outtext.$EOL; }
+    $nline++;
+}
+
+if ($vocabulary_output && $output ne "-") {
+    if ($printunk) {
+	foreach $word (sort keys %unkdic) {
+	    print OFILE "$count{$word}\t$word\n";
+	}	
+    }
+    else {
+	foreach $word (sort keys %count) {
+	    print OFILE "$count{$word}\t$word\n";
+	}
+    }
+}
+
+close(FILE);
+close(OFILE);
+
+
+}
+
+if ($vocabulary_output) {
+    if ($printunk) {
+	foreach $word (sort keys %unkdic) {
+	    print STDERR "$global_count{$word}\t$word\n";
+	}	
+    }
+    else {
+	foreach $word (sort keys %count) {
+	    print STDERR "$global_count{$word}\t$word\n";
+	}
+    }
+}
+
+$endtime=time();
+
+if ($verbose) {
+    $difftime=$endtime-$inittime;
+    if ($difftime!=0) {
+	print STDERR sprintf("$difftime seconds to process $nfiles files (%.2f f/s)\n",$nfiles/$difftime);#"$difftime seconds to process $nfiles files (".$nfiles/$difftime." f/s)\n";
+    }
+    else {
+	print STDERR "less than 1 second to process $nfiles files\n";
+    }
+}
+
+
+
+#ajout au dictionnaire
+sub addtodic() {
+    my ($word,$translation)=@_;
+    $translation_id++;
+    if ($characterseparator ne "") {
+	$translation =~ s/(.)/$1$characterseparator/g; 
+    }
+    if ($word=~/\s/) { # ajout version 0.48 traduction de mots composés
+	$previous="";
+	foreach $subword (split(/\s+/,$word)) {
+	    push (@{$partial{"$subword"}},$translation_id."-"); # mots composés du dictionnaire
+#			if ($previous ne "") {
+#			    push (@{$partial{$previous.$subword}},$translation_id."-"); # mots composés du dictionnaire
+#			}
+	    $previous.="$subword ";
+	}
+	
+	#	@{$partial{$subword}}[-1]="-".$translation_id;
+    } else {
+	push (@{$partial{"$word"}},"$translation_id");
+    }
+    $dico{"$translation_id"}=$translation;
+    $input_word{"$translation_id"}=$word;
+    if ($verbose) { print STDERR "'$word' => '$translation' ($translation_id) \n";}
+    # also add to dico same words marked bad pronounced (*word)
+    $translation_id++;
+    $dico{"$translation_id"}=$translation;
+    $input_word{"$translation_id"}="*$word";
+    # also add to dico same words marked uncertain spell (^^word)
+    $translation_id++;
+    $dico{"$translation_id"}=$translation;
+    $input_word{"$translation_id"}="^^$word";
+#	    print "$word/$subword - $translation ($translation_id)\n";
+}
+
+# normalisation du texte
+sub formatinit {
+    if ($verbose && $firsttime) {
+	print "initialisation des spécificités du format pour la normalisation\n";
+	$firsttime=0;
+    }
+
+    if (($force_mask & $mask{ctm}) || ($format_mask & $mask{ctm})) {
+	$altbegin='<ALT_BEGIN>';
+	$alt='<ALT>';
+	$altend='<ALT_END>';
+	$optword='(%HESITATION)';
+    } else {
+	$filler='(%HESITATION)';
+    }
+
+    if ($normalize == 2) {
+	foreach $hesit (euh, hum, huhum, mm) {
+	    if ($force_mask&$mask{ctm} || $format_mask & $mask{tab}) {
+		&addtodic($hesit, $altbegin.' '.$hesit.' '.$alt.' '.$optword.' '.$altend);
+		if ($verbose) { print "rajout de la traduction normalisée : $hesit => $dico{$hesit}\n"; }
+	    } else {
+		&addtodic($hesit,$filler);
+		&addtodic("($hesit)",$filler);
+		if ($verbose&&$firttime) { print "ajout de la traduction normalisée : $hesit => $filler\n"; $firsttime=0; }
+	    }
+	}
+    }
+}
+
+sub normalize {
+    my ($text,$level)=@_;
+    my $outputtext="";
+    my @lines;
+    $_=$text;
+    @lines=split (/(\n)/,$text); #protection des sauts de ligne
+    my $line;
+    foreach $line (@lines) {
+	$_=$line;
+	my @protected=();
+	if ($format_mask == $mask{"stm-ne"}) { #entités nommées
+	    # entitées imbriquées : une seule fermeture d'entités
+	    while (s/\]\s*\]/\]/) {}
+	    if (s/^([^\]\[]*\])/@@/)  { push(@protected,$1); } # cas d'une EN en début de segment
+	    while (s/(\[[^\]]*\])/@@/) { push(@protected,$1); }
+	    if (s/(\[[^\]]*)$/@@/) { push(@protected,$1); } # cas d'une EN en fin de segment
+	} 
+	if ($_ ne "\n") {
+	    if ( ( $format_mask & $mask{"stm"} ) && ! /ignore_time_segment_in_scoring/i ) {
+		 s/(\s|^)([0-9]+),([0-9]+)(\s|$|.)/$1$2 virgule $3$4/g; #remplace 23,36 par 23 virgule 36
+		 s/(\s|^)([0-9]+)\.([0-9]+)(\s|$|.)/$1$2 point $3$4/g; #remplace 23.36 par 23 point 36
+		 while ($convertnum && /[0-9]+/) {
+		     s/([0-9]+)/" ".&numtolitteral($1)." " /egs; # conversion chiffre en lettres
+		 }
+		 s/\.//g; # supprime les points
+		 s/\"//g;  # supprime les guillemets
+		 s/,//g;   # supprime les virgules
+		 s/\^+//g; # supprime les ^^ (mots à orthographe incertaine)
+		 s/\*(?)/$1/g; # supprime les * (mots mals prononcés)	
+		 s/://g;   # supprime les :  
+		 s/_/ /g;  # supprime les underscores
+		 s/\-/ /g; # supprime les tirets
+		 s/\(([^\)%]+)\)/\(\)/g; # supprime l'intérieur des parenthèses : (aux)quell(es) => ()quell()
+		 while(s/(\s+|^)\(\)([^\s]+)\(\)(\s+|$)/$1\($2\)$3/) {}; # ()quell() => (-quell-)
+		 while(s/(\s+|^)\(\)([^\s]+)(\s+|$)/$1\($2\)$3/) {}; # ()quelles => (-quelles)
+		 while(s/(\s+|^)([^\s]+)\(\)(\s+|$)/$1\($2\)$3/) {}; # aux() => (aux-)
+		 s/(\s*)\(\)(\s*)/$1$3/g; # supprime les ()	
+		 s/(\s|^)([cdjlmnstyL]|jusqu|lorsqu|puisqu|qu|quelqu|quoiqu)\'([[:alpha:]])/$1$2\' $3/g; # ex: d'une => d' une
+		 s/(\()([cdjlmnstyL]|jusqu|lorsqu|puisqu|qu|quelqu|quoiqu)\'([[:alpha:]])/$1$2\' $3/g; # ex: (s'enseign-) => (s' enseign-)
+		 s/(\s|^)([cdjlmnstyL]|jusqu|lorsqu|puisqu|qu|quelqu|quoiqu)\'(\p{L})/$1$2\' $3/g; # Unicode ex: s'élève => s' élève
+		 s/(\()([cdjlmnstyL]|jusqu|lorsqu|puisqu|qu|quelqu|quoiqu)\'(\p{L})/$1$2\' $3/g; # Unicode ex: (s'élè-) => (s' élè-)
+		 s/\///g;s/\\//g; # supprime les slash (/) et anti-slash (\)
+		 s/\?//g;  # supprime les points d'interrogation
+		 s/(.*)\!/$1 \!/g; #décole tous les points d'exclamation
+		 s/AC\s\!/AC\!/g;s/Yahoo\s\!/Yahoo\!/g; #reconstitue AC! et Yahoo!
+		 s/\s\!/ /g; # supprime les points d'exclamation précédés d'un espace
+		 s/(\s|^)([a-z]+)\!/$1$2/g; # supprime les points d'exclamation collés sauf ceux de marques (ex AC! ou Yahoo!)
+		 s/^!//g; #supprime les ! de début de ligne 
+		 s/\[[^\]]*\]//g; #supprime les commentaires
+		 s/\;//g;  # supprime les ;
+		 s/([a-z])\%/$1 %/g; # insère un espace entre le % et le mot précédent
+		 s/\%($|\s)/pour cent$1/g; # remplace % par pour cent s'ils sont suivis d'un espace
+		 s/([^\(]|^)\%//;  # remplace les chaînes "%mot" par "mot"
+		 s/\s+/ /g; # supprime les espaces mutliples par un seul 
+		 s/^\s//g;  #supprime l'espace de début de ligne
+		 s/\s$//g;  # supprime l'espace de fin de ligne
+#		 if (($format_mask == $mask{"stm-ne"})&&($level<1)) { # mots hors entités nommées optionnels
+#		     s/(^|\s+)([^\@ ]+)/$1\($2\)/g; 
+#		 } 
+	    }
+		       if ($format_mask == $mask{lex}) { # format lex
+			   while ($convertnum && /[0-9]+/) {
+			       s/([0-9]+)/" ".&numtolitteral($1)." " /egs; # conversion chiffre en lettres
+			   } 
+			   s/\.//g; # supprime les points
+			   s/\"//g;  # supprime les guillemets
+			   s/,//g;   # supprime les virgules
+			   s/://g;   # supprime les :  
+			   s/_/ /g;  # supprime les underscores
+			   s/((\-t)?\-(il|elle|on|ils|elles|tu|le|la|là|vous|nous|je))($|\s+)/ $1 /g; # -t-il
+			   s/(\s|^)([cdjlmnstyL]|jusqu|lorsqu|puisqu|qu|quelqu|quoiqu)\'/$1$2\' /g; # ex: d'une => d' une
+			   s/\///g;s/\\//g; # supprime les slash (/) et anti-slash (\)
+			   s/(^|\s+)\([^\)]*\)($|\s+)/ /g; # supprime les (.*) isolés
+			   s/\?//g;  # supprime les points d'interrogation
+			   s/(.*)\!/$1 \!/g; #décole tous les points d'exclamation
+			   s/AC\s\!/AC\!/g;s/Yahoo\s\!/Yahoo\!/g; #reconstitue AC! et Yahoo!
+			   s/(^|\s)\!/ /g; # supprime les points d'exclamation précédés d'un espace ou en début de ligne
+			   s/(\s|^)([a-z]+)\!/$1$2/g; # supprime les points d'exclamation collés sauf ceux de marques (ex AC! ou Yahoo!)
+			   while (s/(\[[^\]]*)\s+([^\]]*\])/$1\_$2/) {} # suppression des espaces à l'intérieur des crochets
+#			   s/(\[|\])//g; #supprime les [ et ]
+#			   s/(\(|\))//g; #supprime les ( et )
+			   s/\;//g;  # supprime les ;
+			   s/\s+/ /g; # supprime les espaces mutliples par un seul 
+			   s/^\s//g;  #supprime l'espace de début de ligne
+			   s/\s$//g;  # supprime l'espace de fin de ligne
+		       }
+
+	    if ($format_mask == $mask{json}) { # format json
+		     s/(\s|^)([0-9]+),([0-9]+)(\s|$)/$1$2 virgule $3$4/g; #remplace 23,36 par 23 virgule 36
+		     s/(\s|^)([0-9]+)\.([0-9]+)(\s|$)/$1$2 point $3$4/g; #remplace 23.36 par 23 point 36
+		     while ($convertnum && /[0-9]+/) {
+		         s/([0-9]+)/" ".&numtolitteral($1)." " /egs; # conversion chiffre en lettres
+		     }
+		     s/\.//g; # supprime les points
+		     s/\^+//g; # supprime les ^
+		     s/\-/ /g; # supprime les tirets
+    		     s/(\")([cdjlmnstyL]|jusqu|lorsqu|puisqu|qu|quelqu|quoiqu)\'/$1$2\' /g; # ex: d'une => d' une
+    		     s/(\")([cdjlmnstyL]|jusqu|lorsqu|puisqu|qu|quelqu|quoiqu)\'/$1$2\' /g; # ex: d'une => d' une
+		     s/\///g;s/\\//g; # supprime les slash (/) et anti-slash (\)
+		     s/(\s*)\(\)(\s*)/$1$3/g; # supprime les ()	
+		     s/\?//g;  # supprime les points d'interrogation
+		     s/(.*)\!/$1 \!/g; #décole tous les points d'exclamation
+		     s/AC\s\!/AC\!/g;s/Yahoo\s\!/Yahoo\!/g; #reconstitue AC! et Yahoo!
+		     s/\s\!/ /g; # supprime les points d'exclamation précédés d'un espace
+		     s/(\s|^)([a-z]+)\!/$1$2/g; # supprime les points d'exclamation collés sauf ceux de marques (ex AC! ou Yahoo!)
+		     s/^!//g; #supprime les ! de début de ligne 
+    		     s/\;//g;  # supprime les ;
+		     s/([a-z])\%/$1 %/g; # insère un espace entre le % et le mot précédent
+		     s/\%($|\s)/pour cent$1/g; # remplace % par pour cent s'ils sont suivis d'un espace
+		     s/\s+/ /g; # supprime les espaces mutliples par un seul 
+		     s/^\s//g;  #supprime l'espace de début de ligne
+		     s/\s$//g;  # supprime l'espace de fin de ligne
+	    }
+
+	    if ($format_mask & $mask{ctm} || $format_mask == $mask{txt} || $format_mask == $mask{tab}) { # format ctm ou txt ou tab
+
+		     s/(\s|^)([0-9]+)h ([0-9]+)(\s|$|.)/$1$2 heures $3$4/g; #remplace 13h 13 heure
+		     s/(\s|^)([0-9]+)h/$1$2 heures/g;
+
+		     s/(\s|^)([0-9]+),([0-9]+)(\s|$|.)/$1$2 virgule $3$4/g; #remplace 23,36 par 23 virgule 36
+		     s/(\s|^)([0-9]+)\.([0-9]+)(\s|$|.)/$1$2 point $3$4/g; #remplace 23.36 par 23 point 36
+		     while ($convertnum && /[0-9]+/) {
+		         s/([0-9]+)/" ".&numtolitteral($1)." " /egs; # conversion chiffre en lettres
+		     }
+		     s/»//g; # supprime les guillemets
+		     s/«//g; # supprime les guillemets
+		     s/\.//g; # supprime les points
+		     s/\"//g;  # supprime les guillemets
+		     s/,//g;   # supprime les virgules
+		     s/\^+//g; # supprime les ^
+		     s/\*+//g; # supprime les * 
+		     s/://g;   # supprime les :  
+		     s/_/ /g;  # supprime les underscores
+		     s/\-/ /g; # supprime les tirets
+    		     s/(\s|^)([cdjlmnstyL]|jusqu|lorsqu|puisqu|qu|quelqu|quoiqu)\'/$1$2\' /g; # ex: d'une => d' une
+    		     s/(\s|^)([cdjlmnstyL]|jusqu|lorsqu|puisqu|qu|quelqu|quoiqu)\'/$1$2\' /g; # ex: d'une => d' une
+    		     s/(\s|^)([CDJLMNSTYl]|Jusqu|Lorsqu|Puisqu|Qu|Quelqu|Quoiqu)\'/$1$2\' /g; # ex: d'une => d' une
+		     s/\///g;s/\\//g; # supprime les slash (/) et anti-slash (\)
+		     s/(\s*)\(\)(\s*)/$1$3/g; # supprime les ()	
+		     s/\?//g;  # supprime les points d'interrogation
+		     s/(.*)\!/$1 \!/g; #décole tous les points d'exclamation
+		     s/AC\s\!/AC\!/g;s/Yahoo\s\!/Yahoo\!/g; #reconstitue AC! et Yahoo!
+		     s/\s\!/ /g; # supprime les points d'exclamation précédés d'un espace
+		     s/(\s|^)([a-z]+)\!/$1$2/g; # supprime les points d'exclamation collés sauf ceux de marques (ex AC! ou Yahoo!)
+		     s/^!//g; #supprime les ! de début de ligne 
+		     s/(\[|\])//g; #supprime les [ et ]
+		     s/(\(|\))//g; #supprime les ( et )
+    		     s/\;//g;  # supprime les ;
+		     s/([a-z])\%/$1 %/g; # insère un espace entre le % et le mot précédent
+		     s/\%($|\s)/pour cent$1/g; # remplace % par pour cent s'ils sont suivis d'un espace
+		     s/\s+/ /g; # supprime les espaces mutliples par un seul 
+		     s/^\s//g;  #supprime l'espace de début de ligne
+		     s/\s$//g;  # supprime l'espace de fin de ligne
+          }			       
+	}
+        $outputtext=$_;
+	if ($format_mask == $mask{"stm-ne"}) { #entités nommées
+	    for (my $i=0;$i<=$#protected;$i++) {
+
+		my $content="";
+		my $string=@protected[$i];
+		my @types;
+		while ($string=~s/\[(\S+)\s*\[/\[$1\//) {$string=~s/\]//;} # cas d'entités imbriquées simples
+		if ($string=~s/\[(\S+)\s*//) {
+		    @types=split("/",$1);
+		} else { # EN en début de segment
+		    @types=@lasttypes;
+		}
+		if (!($string=~s/\s*\]//)) { # EN en fin de segment
+		    @lasttypes=@types;
+		}
+		$string=&normalize($string,($level+1));
+		foreach $word (split(/\s/,$string)) {
+		    if ($convertnum) {
+			if ($word=~/^[0-9]+$/) {
+			    $word=&numtolitteral($word);
+			    $word=~s/^\s+//;
+			    $word=~s/\s+$//;
+			    $word=&normalize($word);
+			}
+			$word=~s/\s+/$wordseparator/g;
+		    }
+		    $content.="$word ";
+		}
+
+##		    if ($#types>0) {
+##			$content=~s/\s+/\-\-@types[0] /g;
+##			foreach $word (split(/\s+/,$content)) {
+##			    if ($word ne "") {
+##				foreach $type (@types)
+##			    $
+##			}
+##		    } else {
+##			$content=~s/\s+/\-\-@types[0] /g;
+##}
+		$type=join("/",@types);
+		if ($en_id{$filename} eq "") {
+		    $en_id{$filename}=0;
+		}
+		$content=~s/\s+/\-\-$type\-\-$en_id{$filename} /g;
+		$en_id{$filename}++;
+	    $content=~s/%//;
+		$outputtext=~s/@@/$content/;
+	    }
+	}
+	if ($format_mask != $mask{lex} && $format_mask != $mask{json}) {
+	  $outputtext=lc($outputtext); 
+        }
+    }							   
+    return $outputtext;
+    
+}
+
+#analyse des matchs partiels (mots composés du dictionnaire)
+sub analyse_partial_match() { # en cours de développement
+    return if ($partial_match eq "");
+    my %count=();
+#    @partial_tails=grep {++$count{$_}<2} @partial_tails; ###xxx
+    my $tail_id=0;
+    $partial_match=~s/^\s+//;$partial_match=~s/\s+$//;    
+#    print $partial_match."\n";
+#    @partial_match_ids =  grep { ++$count{$_}<2 } sort numerically map { s/\-//;$_; } @partial_match_ids;
+    for (my $i=0;$i<=$#partial_match_ids;$i++) {
+	foreach my $m (@{@partial_match_ids[$i]}) {
+	    my $match=$m;
+	    $match=~s/\-$//;
+	    my $tmp1=$input_word{$match};
+	    my $tmp2=$dico{$match};
+#	    print "$partial_match : '$tmp1' : '$tmp2'\n";
+#	    print "index:".index($tmp1,$partial_match)."\n";
+	    if ($partial_match=~s/^$tmp1($|\s+)//) {
+		if (($format_mask eq $mask{"stm-ne"}) && (@partial_tails[$i] ne "") ) {
+		    my $tmp3=@partial_tails[$i]; ###xxx
+		    $tmp2=~s/([^\{\}\/ ])($|\s+)/$1\-\-$tmp3 /g; ###xxx
+		}
+		$outtext.=$tmp2.$wordseparator;
+		my @tmp_table=split(/ /,$tmp1);
+		$i+=$#tmp_table;
+		goto NEXT_MATCH;
+	    } 
+	}
+#	print "ici $partial_match @partial_tails[$i]\n";
+	if (($format_mask eq $mask{"stm-ne"}) && (@partial_tails[$i] ne "") ) { ###xxx
+#	    print "ici aussi\n";
+	    $partial_match=~s/^@partial_words[$i]\s*//; ###xxx
+	    $outtext.=@partial_words[$i]."--".@partial_tails[$i].$wordseparator; ###xxx
+	    goto NEXT_MATCH;
+	} ###xxx
+	$partial_match=~s/(\S+)\s*//;
+	$outtext.=$1.$wordseparator;
+      NEXT_MATCH:
+	$i=$i;
+    }
+ #   foreach my $list_match (@partial_match_ids) {
+#	$i++;
+
+    #}
+    @partial_tails=(); ###xxx
+    @partial_match_ids=();
+    @partial_words=();
+    $partial_match="";
+
+#    $outtext.=$partial_match.$wordseparator;
+}
+
+#french num to letteral conversion
+#french num to letteral conversion
+
+sub numtolitteral {
+  my @num = (); # split input string into an array of digits
+  my $sol = undef;
+  my $len = undef;
+
+  my $cent = undef;
+  my $mille = undef;
+  my $million = undef;
+  
+  my $str = shift;
+  $str =~ s/^0*//;
+  @num = reverse split(//, $str);
+  $len = scalar @num;
+
+  return "zéro" if not $len;
+
+  $cent = join("", reverse splice @num, 0, 3);
+  $mille = join("", reverse splice @num, 0, 3);
+  $million = join("", reverse splice @num, 0, 3);
+
+  if ($len <= 3) {
+    $sol = dtoa("zéro", $cent, 1);
+  }
+  elsif ($len >= 4 and $len <= 6)  {
+    $sol = "";
+    $sol = dtoa("", $mille, 0) unless $len == 4 and $mille == 1;
+    $sol = join(" ", $sol, "mille", dtoa("", $cent, 1));
+  }
+  else {
+    $sol = join(" ", dtoa("", $million, 1), "million");
+    $sol = $sol . "s" if $million > 1;
+    my $tmp = "";
+    $tmp = dtoa("", $mille, 0) unless $mille == 1;
+    $sol = join(" ", $sol, $tmp, "mille") unless $mille == 0;
+    $sol = join(" ", $sol, dtoa("", $cent, 1));
+  }
+  $sol =~ s/\s+/ /g;
+  return $sol;
+}
+
+# --------------------- #
+# ---- sub dtoa() ----- #
+# --------------------- #
+sub dtoa() {
+  my $zero = shift;
+  my @tab = split(//, shift);
+  my $final = shift;
+  my $sol = "";
+
+  my @digit = qw(zéro un deux trois quatre cinq six sept huit neuf);
+  my @digit1x = qw/dix onze douze treize quatorze quinze seize dix-sept dix-huit dix-neuf/;
+  my @digitx0 = ("", "dix", "vingt", "trente", "quarante", "cinquante", "soixante", "soixante-dix", "quatre-vingt", "quatre-vingt-dix");
+
+  # remove heading zeros...
+  shift @tab while $tab[0] == 0 and $#tab > 0;
+  my $len = scalar @tab;
+
+  if ($len == 1) { # [0-9]
+    $sol = $digit[$tab[0]];
+    $sol = $zero if $tab[0] == 0;
+  }
+  else {
+    $sol = "";
+    if ($len == 3) {
+      my $c = shift @tab;
+      $sol = $digit[$c] unless $c == 1;
+      $sol = join(" ", $sol, "cent");
+      $sol = $sol . "s" if $c > 1 and $tab[0] == 0 and $tab[1] == 0 and $final;
+    }
+    
+    # convert 2 digits @tab to string
+    my $d2 = "";
+    if ($tab[0] == 0) {
+      $d2 = $digit[$tab[1]] if $tab[1];
+    }
+    elsif ($tab[0] == 1) {
+      $d2 = $digit1x[$tab[1]];
+    }
+    else {
+      if ($tab[1] == 0) {
+	$d2 = $digitx0[$tab[0]];
+	$d2 = $d2 . "s"  if $tab[0] == 8 and $tab[1] == 0 and $final; 
+      }
+      else {
+	if ($tab[0] == 7 or $tab[0] == 9) {
+	  $d2 = join("-", $digitx0[$tab[0] - 1], $digit1x[$tab[1]]);
+	  $d2 = join("-", $digitx0[$tab[0]-1], "et", $digit1x[$tab[1]]) if $tab[0] == 7 and $tab[1] == 1;
+	}
+	else {
+	  $d2 = $digitx0[$tab[0]];
+	  $d2 = $d2 . "s"  if $tab[0] == 8 and $tab[1] == 0 and $final; 
+	  $d2 = $d2 . "-et" if $tab[1] == 1 and $tab[0] != 8;
+	  $d2 = join("-", $d2, $digit[$tab[1]]);
+	}
+      }
+    }
+
+    $sol = join(" ", $sol, $d2);
+  }
+
+  return $sol;
+}
+
+sub numerically () {
+    a <=> b
+}
+
+sub encodingtest () {
+    my ($encoding)=@_;
+    require Encode;
+    if ($encoding =~ /^Guess$/) {
+	return 1;
+    }
+    else {
+	
+	if (Encode::resolve_alias($encoding)) {return 1;}
+	@all_encodings = Encode->encodings(":all"); 
+	foreach $known_encoding (@all_encodings) {
+	    if ($encoding eq  $known_encoding) {
+		return 1;
+	    }
+	}
+    }
+    return 0;
+}
+
+
+sub htmlclean {
+    if ($scriptflag>0) {
+	$_="";
+    } else {
+	$_=~s/^\s+$//;
+	s/&nbsp;/ /g;
+	if (/\&/) {
+	    foreach $SymbLine (&HTMLSymb) {
+		($ascii, $html) = split(/\s\s*/,$SymbLine);
+		$_ =~ s/$html/$ascii /g;
+	    }	
+	}
+    }
+}
+
+
+	
+    
+sub HTMLSymb {
+
+	return ( 
+	"&	&amp;",
+	"\"	&quot;",
+	"<	&lt;",
+	">	&gt;",
+	"©	&copy;",
+	"®	&reg;",
+	"Æ	&AElig;",
+	"Á	&Aacute;",
+	"Â	&Acirc;",
+	"À	&Agrave;",
+	"Å	&Aring;",
+	"Ã	&Atilde;",
+	"Ä	&Auml;",
+	"Ç	&Ccedil;",
+	"Ð	&ETH;",
+	"É	&Eacute;",
+	"Ê	&Ecirc;",
+	"È	&Egrave;",
+	"Ë	&Euml;",
+	"Í	&Iacute;",
+	"Î	&Icirc;",
+	"Ì	&Igrave;",
+	"Ï	&Iuml;",
+	"Ñ	&Ntilde;",
+	"Ó	&Oacute;",
+	"Ô	&Ocirc;",
+	"Ò	&Ograve;",
+	"Ø	&Oslash;",
+	"Õ	&Otilde;",
+	"Ö	&Ouml;",
+	"Þ	&THORN;",
+	"Ú	&Uacute;",
+	"Û	&Ucirc;",
+	"Ù	&Ugrave;",
+	"Ü	&Uuml;",
+	"Ý	&Yacute;",
+	"á	&aacute;",
+	"â	&acirc;",
+	"æ	&aelig;",
+	"à	&agrave;",
+	"å	&aring;",
+	"ã	&atilde;",
+	"ä	&auml;",
+	"ç	&ccedil;",
+	"é	&eacute;",
+	"ê	&ecirc;",
+	"è	&egrave;",
+	"ð	&eth;",
+	"ë	&euml;",
+	"í	&iacute;",
+	"î	&icirc;",
+	"ì	&igrave;",
+	"ï	&iuml;",
+	"ñ	&ntilde;",
+	"ó	&oacute;",
+	"ô	&ocirc;",
+	"ò	&ograve;",
+	"ø	&oslash;",
+	"õ	&otilde;",
+	"ö	&ouml;",
+	"ß	&szlig;",
+	"þ	&thorn;",
+	"ú	&uacute;",
+	"û	&ucirc;",
+	"ù	&ugrave;",
+	"ü	&uuml;",
+	"ý	&yacute;",
+	"ÿ	&yuml;",
+	" 	&#160;",
+	"¡	&#161;",
+	"¢	&#162;",
+	"£	&#163;",
+	"¥	&#165;",
+	"¦	&#166;",
+	"§	&#167;",
+	"¨	&#168;",
+	"©	&#169;",
+	"ª	&#170;",
+	"«	&#171;",
+	"¬	&#172;",
+	"­	&#173;",
+	"®	&#174;",
+	"¯	&#175;",
+	"°	&#176;",
+	"±	&#177;",
+	"²	&#178;",
+	"³	&#179;",
+	"´	&#180;",
+	"µ	&#181;",
+	"¶	&#182;",
+	"·	&#183;",
+	"¸	&#184;",
+	"¹	&#185;",
+	"º	&#186;",
+	"»	&#187;",
+	"¼	&#188;",
+	"½	&#189;",
+	"¾	&#190;",
+	"¿	&#191;",
+	"×	&#215;",
+	"Þ	&#222;",
+	"÷	&#247;",
+        "à      &#224;",
+	"é      &#233;",
+	"ê      &#234;",
+	"ç      &#231;",
+	"\'     &#39;",
+	"\"     &#34;",
+	"è      &#232;",
+        "î     &#238;",
+        "ô     &#244;",
+	"     &#160;",
+	"û    &#251;",
+	"ë &#235;",
+	"û &#251;",
+	"ï &#239;",
+	"É &#201;",
+	"À &#192;",	 
+"È &#200;",
+"Ê &#202;",
+"Î  &#206;",
+"ù &#249;",
+"â &#226;",
+"Ï &#207;",
+"oe &#156;",
+"OE &#338;",
+"Ë &#203;",
+"Ô &#212;",
+"Â &#38;Acirc",
+"ö &#246;",
+   "  &#150;",
+   "Â &#194;",
+   "A &#196;",
+   "Ç &#199;",
+   "Ö &#214;",
+   "Ù &#217;",
+   "Û &#219;",
+   "Ü &#220;",
+   "á &#225;",
+   "ã &#227;",
+   "í &#237;",
+   "ñ &#241;",
+   "ò &#242;",
+   "ó &#243;",
+   "ú &#250;",
+   "ü &#252;",
+   "ÿ &#255;",
+   "& &#38;",
+   "-  &#45;",
+   "¤ &#8364;",
+   "\[ &#91;",
+   "\]  &#93;",
+
+)
+}
+
+
+__END__
+
+=head1 NAME
+
+normalize - v0.55 - normalisation de textes en français (written for ESTER by DGA/FAE & DGA/SGO )
+
+=head1 SYNOPSIS
+
+normalize [-help|h] [-verbose|v] [-input|i input_file_format] [-output|o output_file_format] [-b batch_file] [postprocess|p=s post-processing_command] [inputencoding|ie input_encoding] [outputencoding|oe output_encoding] [inputformat|if input_format] [outputformat|of output_format] [-normalize|n] [-numtolietterals|l] [-dictionary|d dictionary_file]  [-dictionaryseparator|ds=s dictionary_separator] [-skipunknown|s] [-printunknown [mode]] [-wordseparator|w word_string_separator] [-characterseparator|c character_string_separator] [file1 file2 ...]
+  
+Description :
+
+    normalize (v0.55) normalise des fichiers au format texte, xml ou stm (NIST)
+
+Typical usage :
+
+    normalize file.xml -n -l -o %s.norm.xml
+
+    normalise le fichier xml 'file.xml' (retrait de la ponctuation, des '-'), convertit les
+    chiffres en lettre et écrit le résultat dans le fichier 'file.norm.xml'.
+
+    cat file.xml | normalize -n -l -v
+
+    normalise le fichier 'file.xml' depuis STDIN, normalise, et écrit le vocabulaire
+    dans STDOUT.
+
+pour plus d'aide :
+
+    normalize -man
+
+=head2 Mises à jour
+
+=over 8
+
+
+=item B<-Nouveautés version 0.55>
+    - amélioration de la gestion de la normalisation des nombres écrits "23.36" ou "23,36" qui deviennent "23 . 36" ou "23 . 36"
+    - correction de bug : les troncatures sur des apostrophes [ex : l'()] n'étaient pas gérées
+
+=item B<-Nouveautés version 0.54>
+    - normalisation stm-ne : rapprochement vers le format stm (mots non optionnels)
+    - bug : application du dictionnaire d'équivalence aux EN
+
+=item B<-Nouveautés version 0.53>
+    - prise en compte des mots multiples pour le format stm
+    - correction de bugs
+    - déclaration de formats dans les dictionnaires (pour séparation des traitements ctm/stm    
+
+=item B<-Nouveautés version 0.51>
+    - support du format .lex (normalisation spécifique à ce format)
+
+=item B<-Nouveautés version 0.50>
+    - mise à jour pour les formats ctm-ne et stm-ne
+    - correction de bug : output dans un seul fichier maintenant possible
+
+=item B<-Nouveautés version 0.49>
+    - corrections de bugs
+
+
+=item B<-Nouveautés version 0.48>
+    - corrections de bugs
+    - support des expressions composées dans le dictionnaire (mot1 mo2 => mot3 mot4), et remplacement du caractère de séparation par '\s*=>\s*'
+    - possibilité de normalizer avant ou après le passage du dictionnaire (par défaut : après)
+
+=item B<-Nouveautés version 0.47>
+
+    - correction de bugs
+    - support des format stm-ne et ctm-ne (entités nommées)
+    - corrections diverses de normalisation
+    - changement des paramètres par défaut (normalisation et conversion chiffres-lettres par défaut, il faut utiliser l'option -n 0 pour ne pas normaliser et -l 0 pour ne pas convertir les chiffres en lettre)
+
+=head1 OPTIONS
+
+=over 8
+
+=item B<-help>
+
+    Renvoie une aide consise, et sort du programme.
+
+=item B<-man>
+
+    Renvoie cette page de manuel.
+
+=item B<-verbose|v>
+    
+    Résultat détaillé. En particulier, affiche les noms de fichiers
+    en cours de traitement.
+
+=item B<-input|i inpput_file_format>
+
+    Pour normaliser plusieurs fichiers, vous pouvez utiliser un formattage des
+    noms pour simplifier les lignes de commande.
+
+    Exemple :
+
+    normalize -n -l file1 file2 ... file_n -i input_dir/%s.xml
+
+    normalise 'input_dir/file1.xml', 'input_dir/file2.xml', ... 'input_dir/file_n.xml'
+    (résultat dans STDOUT).
+
+
+=item B<-output|o output_file_format>
+
+    Pour sauvegarder la sortie fichier par fichier.
+
+    Exemple :
+
+    normalize -n -l input_dir/*.xml -o output_dir/%s.ext
+
+    traite chaque fichier *.xml dans 'input_dir/'
+    et sauve le résultat dans 'output_dir/' en remplaçant
+    l'extension de fichier 'xml' par 'ext'.
+
+=item B<-batchfile|b batch_file>
+
+    Pour traiter les fichier d'une liste 'batch_file'.
+
+    Exemple 1:
+
+    supposons que nous avons dans 'batch_file' la liste suivante :
+    'input_dir_1/file_1
+     input_dir_2/file_2
+     ...
+     input_dir_n/file_n'
+    
+    alors :
+
+    normalize -n -l -b batch_file
+
+    traite chaque fichier de la liste 'input_dir_n/file_i', et donne
+    le résultat dans la sortie standard STDOUT.
+
+    Exemple 2:
+
+    supponsons maintenant que nous avons dans 'batch_file' :
+    'file_1.xml
+     file_2.xml
+     ...
+     file_n.xml'
+
+    alors :
+
+    normalize -t txt -n -l -b batch_file -i input_dir/%s -o output_dir/%s.txt
+
+    traite tous les fichiers listés dans 'batch_file' et situés dans le
+    répertoire 'input_dir'. Chaque fichier d'entrée donne un fichier
+    résultat au format texte (option -t txt) qui est enregistré dans 'output_dir'
+    avec l'extension '.txt' au lieu de '.xml'
+
+    Exemple 3:
+
+    supposons que nous avons maintenant une liste à deux entrées dans 'batch_file' :
+    'ifile_1    ofile_1
+     ifile_2    ofile_2
+     ...
+     ifile_n    ofile_n'
+
+    alors :
+
+    normalize -n -l -b batch_file -i input_dir/%s -o output_dir/%s.txt
+    
+    traite chaque fichier 'input_dir/ifile_i' et enregistre le résultat dans
+    'output_dir/ofile_i.txt'
+
+
+=item B<-postprocess|p post-processing_command>
+
+    Effectue le post-traitement 'processing_command' avant d'écrire le ou les
+    fichier(s) de sortie (utiliser avec l'option -o, ne fonctionne pas avec la 
+    sortie standard).
+
+    Exemple :
+    
+    normalize -n -l -v input_dir/*.xml -o output_dir/%s.voc -p "sort -nr"
+
+    écrit le vocabulaire de chaque fichier 'input_dir/*.xml' dans
+    'output_dir/*.voc' trié par occurence.
+
+=item B<-inputencoding|ie input_encoding>
+
+    Spécifie l'encodage d'entrée 'input_encoding',
+    par exemple 'utf-8' ou 'UTF8' pour unicode sur 8 bits.
+    Pour un document xml, l'encodage est généralement précisé
+    dans l'entête. Utilisez cette option pour outrepasser l'encodage
+    spécifié dans l'entête.
+
+=item B<-outputencoding|oe output_encoding>
+    
+    Spécifie l'encodage de sortie 'output_encoding' 
+    Par défault, l'encodage de sortie est celui de l'entrée.
+
+=item B<-inputformat|if input_format>
+
+    Spécifie le format d'entrée 'input_format', par exemple
+    'xml', 'html', 'text' ou 'stm'. Si aucun format  d'entrée
+    n'est spécifié, le programme essaye de le deviner.
+
+=item B<-outputformat|of output_format>
+
+    Spécifie le format de sortie 'output_format', par exemple
+    'text' pour une sortie de texte brute, 'vocab' pour le
+    vocabulaire.
+
+=item B<-normalize|n [mode]>
+
+    Utiliser cette option pour normaliser le texte d'entrée
+    en enlevant les espaces multiples, signes de ponctuation,
+    et autres marques (comme '-'). 'mode' est un nombre entier
+    optionnel qui désigne le niveau de normalisation.
+
+       mode       normalisation
+       1          hésitations non optionnelles
+       2          hésitations optionnelles mais différenciées :
+                             euh, hum, huhum
+
+=item B<-numtolitterals|l>
+
+    Convertit les chiffres en lettre (en français). Par exemple,
+    '1981' donnera 'mille neuf cent quatre-vingt-un'.
+
+=item B<-dictionary|d dictionary_file>
+
+    Utilise le dictionnaire 'dictionary_file' pour faire une traduction
+    mot à mot. Utile pour avoir les mots hors vocabulaire (OOV) avec l'option
+    '-of vocab'.
+
+    Format du dictionnaire d'entrée par défaut (cf option -dictionnaryseparator) : suite de lignes de type '(\S+)\s+.*'.
+
+=item B<-dictionnaryseparator|ds dictionnary_string_separator>
+
+    Utilise 'dictionnary_string_separator' comme chaîne de séparation entre les mots du dictionnaire et leur traduction.
+    Chaîne par défaut : '\s+'
+    Exemple : 
+    Si le format d'entrée du dictionnaire est :
+    mot1 => traduction1
+    mot2 => traduction2
+
+    utiliser l'option -ds '\s*=>\s*'
+    La chaîne doit être conforme à la syntaxe des expressions régulières en Perl.
+
+
+=item B<-skipunknown|s>
+
+    Combinée avec l'option '-d', cette option retire les mots hors vocabulaire.
+    Combinée avec l'option '-of v', liste les mots du vocabulaire avec leur décompte.
+
+=item B<-printunknown|u [mode]>
+
+    Remplace les mots hors vocabulaire par 'UNK' si aucun mode n'est spécifié, ou si
+    le mode 1 est utilisé.
+    Si 'mode' vaut 2, supprime simplement les mots hors vocabulaire.
+    Avec l'option '-of v', liste les mots hors vocabulaire avec leur décompte.
+
+=item B<-wordseparator|w word_string_separator>
+
+    Utilise la chaîne de caractères 'word_string_separator' entre les mots.
+
+=item B<-characterseparator|c character_string_separator>
+
+    Utilise la chaîne de caractères 'chararcter_string_separator' entre les lettres des mots.
+    Peut être utile pour une phonétisation par exemple (hors contexte).
+
+=back
+
+
+=cut
+
+
+
+
+
+
+
+
